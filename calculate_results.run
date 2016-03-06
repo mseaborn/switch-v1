@@ -1,0 +1,199 @@
+########################################
+#    Copyright 2007-2012, Matthias Fripp
+#
+#    This file is part of Switch (a power system planning model).
+#
+#    Switch is free software: you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License version 3 
+#    as published by the Free Software Foundation. Modified versions
+#    of Switch must include this notice and the AUTHOR ATTRIBUTION
+#    / CITATION notice below.
+#
+#    Switch is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License
+#    along with Switch.  If not, see <http://www.gnu.org/licenses/>.
+#
+#    AUTHOR ATTRIBUTION / CITATION
+#
+#    In publications based on analysis conducted with Switch, please cite 
+#    Matthias Fripp (2012), "Switch: A Planning Tool for Power Systems 
+#    with Large Shares of Intermittent Renewable Energy", Environmental Science
+#    & Technology 46 (11), pp 6371Ð6378, http://dx.doi.org/10.1021/es204645c
+#
+#    In presentations based on analysis conducted with Switch, please cite the
+#    Switch project's website at http://www.switch-model.org
+#
+########################################
+
+# calculate values to report for the most recently solved model run
+# these only apply to one investment period (usually the last). 
+# they could be updated to apply to multiple periods, but that would require
+# some more complex math (e.g., discounting the mwh of electricity and total costs before dividing them) 
+
+# the reporting parameters used below are all defined in switch.run (with initial values of 0).
+
+# in theory this could be calculated automatically, but something goes wrong when
+# hours_in_sample gets reset and then reassigned
+let reporting_period_hour_count := sum {h in HOURS: period[h]=reporting_period} hours_in_sample[h];
+
+# total cost of power, including carbon. 
+# This comes directly from the objective function, limited to the reporting period
+# and omitting the interruptible load and energy efficiency benefits,
+# and using hours_in_sample instead of hourly_cost_weight (which is discounted)
+let total_cost := 
+  sum {p in PERIODS, h in HOURS: p=reporting_period and period[h]=p} hours_in_sample[h] * (
+      sum {(z, t, s, o, v, h) in PROJ_VINTAGE_HOURS} 
+        InstallGen[z, t, s, o, v] * fixed_cost_per_hour[z, t, s, o, v]
+    + sum {(z, t, s, o) in PROJ_DISPATCH} 
+        DispatchGen[z, t, s, o, h] * (variable_cost_per_mwh[t, h] + heat_rate[t]/1000 * carbon_content[fuel[t]] * carbon_cost)
+    + sum {(z, e, p) in EP_PERIODS} ep_size_mw[z, e] * ep_capital_cost_per_hour[z, e]
+    + sum {(z, e, p) in EP_PERIODS} 
+        OperateEPDuringYear[z, e, p] * ep_size_mw[z, e] * ep_fixed_cost_per_hour[z, e]
+    + sum {(z, e, p) in EP_BASELOAD_PERIODS}
+        OperateEPDuringYear[z, e, p] * (1-ep_forced_outage_rate[z, e]) * (1-ep_scheduled_outage_rate[z, e]) * ep_size_mw[z, e] 
+        * (ep_variable_cost_per_mwh[z, e, h] + ep_heat_rate[z, e]/1000 * carbon_content[ep_fuel[z, e]] * carbon_cost)
+    + sum {(z, e, h) in EP_DISPATCH_HOURS}
+        DispatchEP[z, e, h]
+        * (ep_variable_cost_per_mwh[z, e, h] + ep_heat_rate[z, e]/1000 * carbon_content[ep_fuel[z, e]] * carbon_cost)
+    + hydro_cost_per_mw_per_hour * hydro_total_capacity
+    + sum {(z1, z2) in TRANS_LINES, v in VINTAGE_YEARS: v <= p} 
+        InstallTrans[z1, z2, v] * transmission_cost_per_mw_per_hour[z1, z2, v]
+    + sum {(z1, z2) in TRANS_LINES} 
+        transmission_cost_per_existing_mw_per_hour[z1, z2] * (existing_transmission_from[z1, z2] + existing_transmission_to[z1, z2])/2
+    + sum {z in LOAD_ZONES, v in VINTAGE_YEARS: v <= p}
+        InstallLocalTD[z, v] * local_td_cost_per_mw_per_hour[v]
+    + sum {z in LOAD_ZONES} UnsatisfiedLoad[z, h] * unsatisfied_load_penalty
+  );
+
+# total cost of carbon (stripped-down version of total cost calculation)
+let total_carbon_cost := 
+  sum {p in PERIODS, h in HOURS: p=reporting_period and period[h]=p} hours_in_sample[h] * (
+    + sum {(z, t, s, o) in PROJ_DISPATCH} 
+        DispatchGen[z, t, s, o, h] * (heat_rate[t]/1000 * carbon_content[fuel[t]] * carbon_cost)
+    + sum {(z, e, p) in EP_BASELOAD_PERIODS}
+        OperateEPDuringYear[z, e, p] * (1-ep_forced_outage_rate[z, e]) * (1-ep_scheduled_outage_rate[z, e]) * ep_size_mw[z, e] 
+        * (ep_heat_rate[z, e]/1000 * carbon_content[ep_fuel[z, e]] * carbon_cost)
+    + sum {(z, e, h) in EP_DISPATCH_HOURS}
+        DispatchEP[z, e, h]
+        * (ep_heat_rate[z, e]/1000 * carbon_content[ep_fuel[z, e]] * carbon_cost)
+  );
+
+# total tons of co2 (stripped-down version of co2 cost calculation above)
+# (could also be found simply as total_carbon_cost / carbon_cost)
+let co2_tons := 
+  sum {p in PERIODS, h in HOURS: p=reporting_period and period[h]=p} hours_in_sample[h] * (
+    + sum {(z, t, s, o) in PROJ_DISPATCH} 
+        DispatchGen[z, t, s, o, h] * (heat_rate[t]/1000 * carbon_content[fuel[t]])
+    + sum {(z, e, p) in EP_BASELOAD_PERIODS}
+        OperateEPDuringYear[z, e, p] * (1-ep_forced_outage_rate[z, e]) * (1-ep_scheduled_outage_rate[z, e]) * ep_size_mw[z, e] 
+        * (ep_heat_rate[z, e]/1000 * carbon_content[ep_fuel[z, e]])
+    + sum {(z, e, h) in EP_DISPATCH_HOURS}
+        DispatchEP[z, e, h]
+        * (ep_heat_rate[z, e]/1000 * carbon_content[ep_fuel[z, e]])
+  );
+
+
+# total load satisfied, including transmission losses, from Satisfy_Load constraint
+let load_mwh := 
+sum {z in LOAD_ZONES, h in HOURS: period[h]=reporting_period} hours_in_sample[h] * (
+  system_load_fixed[z, h] * ClearAnnualDemand[z, period[h]]/max(annual_demand_quantity_base_mwh[z, period[h]], 1e-6)
+  + DispatchSystemLoad[z, h]
+  - (sum {(z, z2) in TRANS_LINES} (transmission_efficiency[z, z2] * DispatchTransTo[z, z2, h] - DispatchTransFrom[z, z2, h]))
+  + (sum {(z1, z) in TRANS_LINES} (DispatchTransTo[z1, z, h] - transmission_efficiency[z1, z] * DispatchTransFrom[z1, z, h]))
+);
+
+# total amount of load left unsatisfied
+let unsatisfied_load_mwh := sum {z in LOAD_ZONES, h in HOURS: period[h]=reporting_period} hours_in_sample[h] * UnsatisfiedLoad[z, h];
+
+# total power generated (excluding transmission losses), assumed equal to load+surplus
+let gen_mwh := load_mwh 
+  + sum {z in LOAD_ZONES, h in HOURS: period[h]=reporting_period} 
+      hours_in_sample[h] * Satisfy_Load[z, h].slack;
+
+# generation from various sources, taken from Satisfy_Load constraint, 
+# with appropriate summing expression
+
+# new wind projects
+let wind_mwh := 
+  sum {z in LOAD_ZONES, h in HOURS: period[h]=reporting_period} hours_in_sample[h] * 
+    (sum {(z, t, s, o, v, h) in PROJ_INTERMITTENT_VINTAGE_HOURS: t=tech_wind} 
+      (1-forced_outage_rate[t]) * cap_factor[z, t, s, o, h] * InstallGen[z, t, s, o, v]);
+# new troughs
+let trough_mwh := 
+  sum {z in LOAD_ZONES, h in HOURS: period[h]=reporting_period} hours_in_sample[h] * 
+    (sum {(z, t, s, o, v, h) in PROJ_INTERMITTENT_VINTAGE_HOURS: t=tech_trough} 
+      (1-forced_outage_rate[t]) * cap_factor[z, t, s, o, h] * InstallGen[z, t, s, o, v]);
+# new pv
+let pv_mwh := 
+  sum {z in LOAD_ZONES, h in HOURS: period[h]=reporting_period} hours_in_sample[h] * 
+    (sum {(z, t, s, o, v, h) in PROJ_INTERMITTENT_VINTAGE_HOURS: t=tech_pv} 
+      (1-forced_outage_rate[t]) * cap_factor[z, t, s, o, h] * InstallGen[z, t, s, o, v]);
+
+# geothermal
+let geothermal_mwh :=
+  sum {z in LOAD_ZONES, h in HOURS: period[h]=reporting_period} hours_in_sample[h] * (
+  sum {(z, t, s, o) in PROJ_DISPATCH: fuel[t]="Geothermal"} DispatchGen[z, t, s, o, h]
+  + sum {(z, e, p) in EP_BASELOAD_PERIODS: p=period[h] and ep_fuel[z, e]="Geothermal"} 
+      (OperateEPDuringYear[z, e, p] * (1-ep_forced_outage_rate[z, e]) * (1-ep_scheduled_outage_rate[z, e]) * ep_size_mw[z, e])
+  + sum {(z, e, h) in EP_DISPATCH_HOURS: ep_fuel[z, e]="Geothermal"} 
+      DispatchEP[z, e, h]
+  );
+
+# hydro (net of pumping and losses)
+let hydro_mwh := 
+  sum {z in LOAD_ZONES, h in HOURS: period[h]=reporting_period} hours_in_sample[h] * (
+    (1 - forced_outage_rate_hydro) * (sum {(z, s) in PROJ_PUMPED_HYDRO} DispatchPumpedHydro[z, s, h])
+  - (1 - forced_outage_rate_hydro) * (1/pumped_hydro_efficiency) * 
+      (sum {(z, s) in PROJ_PUMPED_HYDRO} StorePumpedHydro[z, s, h])
+  + (1 - forced_outage_rate_hydro) * 
+    (min_hydro_dispatch_all_sites[z, date[h]] 
+       + HydroDispatchShare[period[h], z, season_of_year[h], hour_of_day[h]]
+         * (avg_hydro_dispatch_all_sites[z, date[h]] - min_hydro_dispatch_all_sites[z, date[h]]) * 24)
+  );
+
+# Nuclear
+let nuclear_mwh := 
+  sum {z in LOAD_ZONES, h in HOURS: period[h]=reporting_period} hours_in_sample[h] * (
+  sum {(z, t, s, o) in PROJ_DISPATCH: fuel[t]="Nuclear"} DispatchGen[z, t, s, o, h]
+  + sum {(z, e, p) in EP_BASELOAD_PERIODS: p=period[h] and ep_fuel[z, e]="Nuclear"} 
+      (OperateEPDuringYear[z, e, p] * (1-ep_forced_outage_rate[z, e]) * (1-ep_scheduled_outage_rate[z, e]) * ep_size_mw[z, e])
+  + sum {(z, e, h) in EP_DISPATCH_HOURS: ep_fuel[z, e]="Nuclear"} 
+      DispatchEP[z, e, h]
+  );
+
+# Gas
+let gas_mwh := 
+  sum {z in LOAD_ZONES, h in HOURS: period[h]=reporting_period} hours_in_sample[h] * (
+  sum {(z, t, s, o) in PROJ_DISPATCH: fuel[t]="Gas"} DispatchGen[z, t, s, o, h]
+  + sum {(z, e, p) in EP_BASELOAD_PERIODS: p=period[h] and ep_fuel[z, e]="Gas"} 
+      (OperateEPDuringYear[z, e, p] * (1-ep_forced_outage_rate[z, e]) * (1-ep_scheduled_outage_rate[z, e]) * ep_size_mw[z, e])
+  + sum {(z, e, h) in EP_DISPATCH_HOURS: ep_fuel[z, e]="Gas"} 
+      DispatchEP[z, e, h]
+  );
+
+# Coal
+let coal_mwh := 
+  sum {z in LOAD_ZONES, h in HOURS: period[h]=reporting_period} hours_in_sample[h] * (
+  sum {(z, t, s, o) in PROJ_DISPATCH: fuel[t]="Coal"} DispatchGen[z, t, s, o, h]
+  + sum {(z, e, p) in EP_BASELOAD_PERIODS: p=period[h] and ep_fuel[z, e]="Coal"} 
+      (OperateEPDuringYear[z, e, p] * (1-ep_forced_outage_rate[z, e]) * (1-ep_scheduled_outage_rate[z, e]) * ep_size_mw[z, e])
+  + sum {(z, e, h) in EP_DISPATCH_HOURS: ep_fuel[z, e]="Coal"} 
+      DispatchEP[z, e, h]
+  );
+
+# levelized cost of power per mwh, including CO2 adder
+let cost_per_mwh := total_cost / load_mwh;
+
+# levelized cost of power per mwh, net of CO2 adder
+let net_cost_per_mwh := (total_cost - total_carbon_cost) / load_mwh;
+
+# emissions reduced from base year
+let co2_tons_reduced_vs_base_year := co2_base_tons - co2_tons / years_per_period;
+
+# emissions as a ratio vs. the base year (co2_base_year)
+let co2_ratio_vs_base_year := co2_tons / years_per_period / co2_base_tons;
+

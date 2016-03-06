@@ -1,0 +1,277 @@
+########################################
+#    Copyright 2007-2012, Matthias Fripp
+#
+#    This file is part of Switch (a power system planning model).
+#
+#    Switch is free software: you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License version 3 
+#    as published by the Free Software Foundation. Modified versions
+#    of Switch must include this notice and the AUTHOR ATTRIBUTION
+#    / CITATION notice below.
+#
+#    Switch is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License
+#    along with Switch.  If not, see <http://www.gnu.org/licenses/>.
+#
+#    AUTHOR ATTRIBUTION / CITATION
+#
+#    In publications based on analysis conducted with Switch, please cite 
+#    Matthias Fripp (2012), "Switch: A Planning Tool for Power Systems 
+#    with Large Shares of Intermittent Renewable Energy", Environmental Science
+#    & Technology 46 (11), pp 6371Ð6378, http://dx.doi.org/10.1021/es204645c
+#
+#    In presentations based on analysis conducted with Switch, please cite the
+#    Switch project's website at http://www.switch-model.org
+#
+########################################
+
+# note: this script should be called from a subdirectory
+# holding all the tab files.
+# it assumes that the model itself is at the next higher directory level
+
+reset;
+
+# look for a usable solver
+option solver cplex_auto;
+shell ("which " & $solver & " > /dev/null");
+if shell_exitcode = 0 then {
+  print "Using 'option solver " & $solver & "'";
+};
+if shell_exitcode != 0 then {
+  option solver cplexamp;
+  shell ("which " & $solver & " > /dev/null");
+  if shell_exitcode = 0 then {
+    print "Using 'option solver " & $solver & "'";
+  };
+};
+if shell_exitcode != 0 then {
+  option solver cplex;
+  shell ("which " & $solver & " > /dev/null");
+  if shell_exitcode = 0 then {
+    print "Using 'option solver " & $solver & "'";
+  };
+};
+if shell_exitcode != 0 then {
+  print "Unable to find a solver in the path.";
+  option solver "";
+};
+
+if match($solver, 'cplex') > 0 then {
+  option cplex_options 'primalopt lpdisplay=1 advance=2';
+}
+
+option presolve 0;
+
+  # pgradient=-1 scale=1';
+  # barrier: option cplex_options 'baropt bardisplay=1 threads=1';
+  # option cplex_options 'baropt bardisplay=1 densecol=1000'; 
+  # without densecol: 37 dense columns 19.7M/82.7M nonzeros, 175B FPOPS, 60 iter, 3301 seconds
+  # denscol=1000: 489 dense columns, 19.1M/87.9M nonzeros, 207B FPOPS, 62 iter, 3438 seconds
+  # denscol=10000: no dense columns, 30.5M/129.5M nonzeros, 333B FPOPS, 75 iter, 6196 seconds
+  # option cplex_options 'siftopt';
+
+model ../switch.mod;
+
+data ../switch.dat;
+data ../generator_costs.dat;
+
+table study_hours IN: HOURS <- [hour], period, date, hours_in_sample, month_of_year, hour_of_day;
+read table study_hours;
+
+table load_zones IN: LOAD_ZONES <- [load_zone], load_zone_x, load_zone_y;
+read table load_zones;
+
+table existing_plants IN: 
+  EXISTING_PLANTS <- [load_zone, plant_code], 
+    ep_size_mw ~ size_mw, ep_fuel ~ fuel, ep_heat_rate ~ heat_rate, 
+    ep_vintage ~ start_year, ep_max_age_years ~ max_age, 
+    ep_overnight_cost ~ overnight_cost, ep_fixed_o_m ~ fixed_o_m, ep_variable_o_m ~ variable_o_m,
+    ep_forced_outage_rate ~ forced_outage_rate, ep_scheduled_outage_rate ~ scheduled_outage_rate, 
+    ep_baseload ~ baseload, ep_cogen ~ cogen;
+read table existing_plants;
+  
+
+table trans_lines IN: 
+  TRANS_LINES <- [load_zone_start, load_zone_end], tid, transmission_length_km, 
+    transmission_efficiency, existing_transmission_from, existing_transmission_to;
+read table trans_lines;
+
+table system_load IN: [load_zone, hour], system_load_fixed ~ system_load;
+read table system_load;
+
+table max_capacity IN: 
+  PROJ_RESOURCE_LIMITED <- [load_zone, technology, site, orientation], max_capacity;
+read table max_capacity;
+
+table connect_cost IN: 
+  [load_zone, technology, site, orientation], connect_length_km, connect_cost_per_kw;
+read table connect_cost;
+
+table cap_factor IN: 
+  PROJ_INTERMITTENT_HOURS <- [load_zone, technology, site, orientation, hour], cap_factor;
+read table cap_factor;
+
+table hydro IN: 
+  PROJ_HYDRO_DATES <- [load_zone, site, date], 
+  avg_hydro_flow ~ avg_flow, min_hydro_flow ~ min_flow, max_hydro_flow ~ max_flow;
+read table hydro;
+
+#solve;
+
+# display Power_Cost / system_load_discounted;
+
+# set and parameters used to make carbon cost curves
+set CARBON_COSTS;
+param tech_install {CARBON_COSTS, TECHNOLOGIES};
+param tech_dispatch {CARBON_COSTS, TECHNOLOGIES};
+param carbon_emissions {CARBON_COSTS};
+
+# parameter used to track execution times
+param curtime;
+
+# parameters used for reporting total generation and transmission
+
+# name of the scenario (includes model and scenario name)
+param scenario_name symbolic default sub(_cd, "^.*/([^/]+/[^/]+$)", "\1");
+#read scenario_name <scenario_name.txt;
+
+# years and hours to report
+set STUDY_YEARS ordered = PERIODS;
+param last_hour_of_year {y in STUDY_YEARS} = max {h in HOURS: period[h]= y} h;
+param first_hour_of_year {y in STUDY_YEARS} = min {h in HOURS: period[h] = y} h;
+param samples_in_year {y in STUDY_YEARS} = 
+  card({h in HOURS: period[h]=y});
+set ZONAL_REPORTING_YEARS ordered = {last(STUDY_YEARS)};
+set ZONAL_REPORTING_HOURS ordered = {h in HOURS: period[h] in ZONAL_REPORTING_YEARS};
+
+# parameters to report transmission and generation from various sources, in each load zone
+set TECHNOLOGIES_INTERMITTENT = setof {t in TECHNOLOGIES: intermittent[t]} (t);
+set TECHNOLOGIES_DISPATCH = setof {(z, t, s, o) in PROJ_DISPATCH} (t);
+param total_gen {LOAD_ZONES, TECHNOLOGIES, STUDY_YEARS} default 0;
+param surplus_gen {LOAD_ZONES, TECHNOLOGIES_INTERMITTENT, STUDY_YEARS} default 0;
+param intermittent_surplus_fraction {LOAD_ZONES, HOURS} default 0;
+param total_gen_installed {t in TECHNOLOGIES, y in STUDY_YEARS};
+param total_trans {TRANS_LINES, STUDY_YEARS} default 0;
+param avg_gen_by_zone {LOAD_ZONES, TECHNOLOGIES} default 0, >= 0;
+param avg_surp_by_zone {LOAD_ZONES, TECHNOLOGIES_INTERMITTENT} default 0, >= 0;
+param avg_load_by_zone {LOAD_ZONES} default 0, >= 0;
+param avg_gen_by_year {STUDY_YEARS, TECHNOLOGIES} default 0, >= 0;
+param avg_surp_by_year {STUDY_YEARS, TECHNOLOGIES_INTERMITTENT} default 0, >= 0;
+param avg_load_by_year {STUDY_YEARS} default 0, >= 0;
+param power_cost_by_year {STUDY_YEARS} >= 0;
+param outfile symbolic;
+
+# newer reporting parameters, used by the sensitivity framework (the set above may be obsolete)
+param reporting_period default last(PERIODS);
+param reporting_period_hour_count default 0; 
+param co2_tons default 0;
+param total_cost default 0;
+param total_carbon_cost default 0;
+param load_mwh default 0;
+param unsatisfied_load_mwh default 0;
+param gen_mwh default 0;
+param wind_mwh default 0;
+param trough_mwh default 0;
+param pv_mwh default 0;
+param hydro_mwh default 0;
+param geothermal_mwh default 0;
+param nuclear_mwh default 0;
+param gas_mwh default 0;
+param coal_mwh default 0;
+param cost_per_mwh default 0;
+param net_cost_per_mwh default 0;
+param co2_tons_reduced_vs_base_year default 0;
+param co2_ratio_vs_base_year default 0;
+
+# base-year emission values used for reporting
+# (these parameters and values should probably be moved to switch.mod and switch.dat,
+# but they're not really central to the model, so they're kept here.)
+param co2_base_year default 1990;
+param co2_base_tons default 86700000; # + 0.5*305983000*42*8.8/1000; # including half of cars
+# Note: 1990 electricity emissions (86700000) from table 6 at http://www.climatechange.ca.gov/policies/greenhouse_gas_inventory/index.html
+#   (the table is in http://www.energy.ca.gov/2006publications/CEC-600-2006-013/figures/Table6.xls)
+# that may not include cogen plants?
+# note: 100% of 1990 gasoline emissions would be 305983000*42*8.8/1000;
+# 1990 california gasoline consumption from eia: http://www.eia.doe.gov/emeu/states/sep_use/total/use_tot_ca.html
+# gasoline emission coefficient from http://www.epa.gov/OMS/climate/420f05001.htm
+
+##########
+# parameters used for all-hours evaluation
+##########
+# parameters to identify the hour with the highest unsatisfied load
+param peak_unsatisfied_hour;
+param first_unsatisfied_period;
+
+# parameters to aggregate values of all the model results
+param agg_reporting_period_hour_count default 0;
+param agg_co2_tons default 0;
+param agg_total_cost default 0;
+param agg_total_carbon_cost default 0;
+param agg_load_mwh default 0;
+param agg_unsatisfied_load_mwh default 0;
+param agg_gen_mwh default 0;
+param agg_wind_mwh default 0;
+param agg_trough_mwh default 0;
+param agg_pv_mwh default 0;
+param agg_hydro_mwh default 0;
+param agg_geothermal_mwh default 0;
+param agg_nuclear_mwh default 0;
+param agg_gas_mwh default 0;
+param agg_coal_mwh default 0;
+
+param agg_cost_per_mwh default 0;
+param agg_net_cost_per_mwh default 0;
+param agg_co2_tons_reduced_vs_base_year default 0;
+param agg_co2_ratio_vs_base_year default 0;
+
+##############
+# scratch parameter for reading files from disk
+##############
+# (without something like this, it's impossible to read from disk without creating a new parameter,
+# and that can't be done within a loop)
+param readfile symbolic;
+
+# how much of the elastic demand was satisfied?
+# display {z in LOAD_ZONES, p in PERIODS: annual_demand_quantity_base_mwh[z, p] > 0} ClearAnnualDemand[z, p]/annual_demand_quantity_base_mwh[z, p];
+
+# what fraction of the available interruptible load was contracted?
+# display {z in LOAD_ZONES, p in PERIODS: interruptible_load_breakpoint_mw[z, p, 1] > 0} AcceptInterruptibleLoad[z, p]*interruptible_load_max_share/interruptible_load_breakpoint_mw[z, p, last(INTERRUPTIBLE_LOAD_BREAKPOINTS)];
+
+# annual installations
+#display {v in VINTAGE_YEARS, t in TECHNOLOGIES} sum {(z, t, s, o) in PROJECTS} InstallGen[z, t, s, o, v];
+# total installations
+#display {t in TECHNOLOGIES} sum {(z, t, s, o) in PROJECTS, v in VINTAGE_YEARS} InstallGen[z, t, s, o, v];
+# wind capacity by load area
+# display {z in LOAD_ZONES} sum {(z, t, s, o, v) in PROJECT_VINTAGES: t=tech_wind} InstallGen[z, t, s, o, v];
+
+# new transmission MW-km
+# display sum {v in VINTAGE_YEARS, (z1, z2) in TRANS_LINES} InstallTrans[z1, z2, v] * transmission_length_km[z1, z2];
+# display {(z1, z2) in TRANS_LINES} sum {v in VINTAGE_YEARS} InstallTrans[z1, z2, v] * transmission_length_km[z1, z2];
+# display {v in VINTAGE_YEARS} sum {(z1, z2) in TRANS_LINES} InstallTrans[z1, z2, v] * transmission_length_km[z1, z2];
+# existing trans MW-km
+# display sum {(z1, z2) in TRANS_LINES} max(existing_transmission_to[z1, z2], existing_transmission_from[z1, z2]) * transmission_length_km[z1, z2];
+# % increase in transmission:
+# display (sum {v in VINTAGE_YEARS, (z1, z2) in TRANS_LINES} InstallTrans[z1, z2, v] * transmission_length_km[z1, z2])/(sum {(z1, z2) in TRANS_LINES} max(existing_transmission_to[z1, z2], existing_transmission_from[z1, z2]) * transmission_length_km[z1, z2]);
+
+# capacity factor of intermittent sites
+#display {t in TECHNOLOGIES: intermittent[t]} 
+#  (sum {(z,t,s,o,v,h) in PROJ_INTERMITTENT_VINTAGE_HOURS: v=first(VINTAGE_YEARS)} hours_in_sample[h]*cap_factor[z,t,s,o,h]) 
+#  / (sum {(z,t,s,o,v,h) in PROJ_INTERMITTENT_VINTAGE_HOURS: v=first(VINTAGE_YEARS)} hours_in_sample[h]);
+
+# reset cap_factor to zero for all renewables during the system peak hour (takes at least a few minutes)
+# set PEAK_HOURS = setof {p in PERIODS, h in HOURS: period[h]=p and sum {z in LOAD_ZONES} system_load[z,h] = max {h2 in HOURS: period[h2]=p} sum{z in LOAD_ZONES} system_load[z,h2]} (h);
+# let {(z, t, s, o, h) in PROJ_INTERMITTENT_HOURS: h in PEAK_HOURS} cap_factor[z, t, s, o, h] := 0;
+
+#display 1 - (sum {(z, t, s, o) in PROJ_DISPATCH, h in HOURS: vintage_period[h]=last(VINTAGES)} DispatchGen[z, t, s, o, h])/(sum {z in LOAD_ZONES, h in HOURS: vintage_period[h]=last(VINTAGES)} system_load[z, h]);
+
+#let {(z, s, h) in PROJ_HYDRO_HOURS} avg_hydro_flow[z, s, h]:=0; let {(z, s, h) in PROJ_HYDRO_HOURS} max_hydro_flow[z, s, h]:=0; let {(z, s, h) in PROJ_HYDRO_HOURS} min_hydro_flow[z, s, h]:=0;
+
+#display {t in TECHNOLOGIES} sum {(z, t, s, o) in PROJ_DISPATCH, h in HOURS} DispatchGen[z, t, s, o, h];
+
+# display {p in PERIODS, z in setof {(z,s) in PROJ_SIMPLE_HYDRO} (z), s in SEASONS_OF_YEAR, h in HOURS_OF_DAY: s=3} floor(10^(40*HydroDispatchShare[p, z, s, h]));
+
+# display {z in LOAD_ZONES, p in PERIODS: interruptible_load_breakpoint_mw[z, p, 1] > 0} AcceptInterruptibleLoad[z, p]*interruptible_load_max_share/interruptible_load_breakpoint_mw[z, p, last(INTERRUPTIBLE_LOAD_BREAKPOINTS)];

@@ -1,0 +1,225 @@
+########################################
+#    Copyright 2007-2012, Matthias Fripp
+#
+#    This file is part of Switch (a power system planning model).
+#
+#    Switch is free software: you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License version 3 
+#    as published by the Free Software Foundation. Modified versions
+#    of Switch must include this notice and the AUTHOR ATTRIBUTION
+#    / CITATION notice below.
+#
+#    Switch is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License
+#    along with Switch.  If not, see <http://www.gnu.org/licenses/>.
+#
+#    AUTHOR ATTRIBUTION / CITATION
+#
+#    In publications based on analysis conducted with Switch, please cite 
+#    Matthias Fripp (2012), "Switch: A Planning Tool for Power Systems 
+#    with Large Shares of Intermittent Renewable Energy", Environmental Science
+#    & Technology 46 (11), pp 6371Ð6378, http://dx.doi.org/10.1021/es204645c
+#
+#    In presentations based on analysis conducted with Switch, please cite the
+#    Switch project's website at http://www.switch-model.org
+#
+########################################
+
+# data file params.dat
+
+# the year to which costs should be discounted
+param base_year := 2012;
+
+# list of investment periods (by year)
+set PERIODS := 2012 2016 2020 2024;
+
+# annual rate (real) to use to discount future costs to current year
+param discount_rate := 0.03;
+
+# required rates of return (real) for generators and transmission lines
+param finance_rate default 0.06 := DistPV 0.03;
+param transmission_finance_rate := 0.06;
+
+# retirement age for transmission lines
+param transmission_max_age_years := 20;
+
+# cost per mw-km for new and existing transmission lines
+param transmission_cost_per_mw_km := 1000;
+param transmission_cost_per_existing_mw_km := 1000;
+
+# forced outage rate for transmission lines, used for probabilistic dispatch(!)
+param transmission_forced_outage_rate := 0.01;
+
+# parameters for intra-zone transmission and distribution
+# MID has a demand charge of $8.80/kW each month; this works out to $105,600/MW-year
+# TODO: find a better source than this (start with E3 2004)
+param local_td_annual_payment_per_mw := 100000;
+param local_td_max_age_years := 20;
+
+# forced outage rate for hydroelectric dams
+# this is used to de-rate the planned power production
+# TODO: get a better number for this (0.02 is typical for power projects generally)
+param forced_outage_rate_hydro := 0.02;
+
+# round-trip efficiency for storing power via a pumped hydro system
+# (CAISO says 70% is typical: http://www.caiso.com/1fd5/1fd57358220a0.pdf)
+param pumped_hydro_efficiency := 0.7;
+
+# maximum share of each day's "discretionary" hydro flow 
+# (everything between the minimum_hydro_flow and the average_hydro_flow) 
+# that can be dispatched in a single hour
+# Higher values will produce narrower, taller hydro dispatch schedules,
+# but also more "baseload" hydro.
+param max_hydro_dispatch_per_hour = 0.167;
+
+# "carrying cost" for hydro and pumped hydro facilities ($/MWp/year)
+# this is calculated as 
+#   $1500/kW * 1000 kW/MW * 0.061 (capital recovery factor for a 70-year project at 6% interest)
+#   + 13/kW * 1000 kW/MW (fixed O&M per MW)
+#   + 3.3/MWh * 8760 * 0.3 h/y (variable O&M and approx. capacity factor for CA hydro projects [0.26 for all projects, 0.35 for simple hydro])
+# (this works out to about $43/MWh)
+# TODO: calculate hydro costs endogenously 
+#   (that will require some neat way of getting hydro plant and cost data into ampl, 
+#   maybe via existing_plants.tab; that will also require adding a flag to prevent 
+#   the model from trying to dispatch these plants along with the gas and coal ones) 
+param hydro_annual_payment_per_mw := 113172;
+
+# planning reserve margin - fractional extra load the system must be able to serve
+# when there are no forced outages
+param planning_reserve_margin = 0.15;
+
+# elasticity of interruptible load
+# this is the amount (in dollars per kw-year) by which the cost of 
+# interruptible load increases for each percent of the system peak load
+# that is satisfied with interruptible load
+#param interruptible_load_cost_per_kw_year_per_percent_peak_load := 19;
+
+# the maximum amount of interruptible load that can be used in any load zone
+# (specified as a fraction of the peak load, e.g., 0.20)
+#param interruptible_load_max_share := 0.05;
+
+# the total cost of developing interruptible load is quadratic in the
+# amount developed, but we approximate it using a piecewise-linear curve.
+# this tells how many segments are in that curve
+#param interruptible_load_cost_segment_count := 20;
+
+# list of fuel types
+set FUELS := Gas  Coal Nuclear Wind Solar Geothermal;
+
+# Names of intermittent and resource-limited technologies. 
+param tech_ccgt := "CCGT";
+param tech_ct := "CT100";
+param tech_pv := "DistPV";
+param tech_trough := "Trough";
+param tech_wind := "Wind";
+
+# default values for projects that don't have sites or orientations
+param site_unspecified := "na";
+param orient_unspecified := "na";
+
+# years that could be studied 
+# (this must exactly match the years shown in the fuel_cost table)
+set YEARS :=
+2005
+2006
+2007
+2008
+2009
+2010
+2011
+2012
+2013
+2014
+2015
+2016
+2017
+2018
+2019
+2020
+2021
+2022
+2023
+2024
+2025
+2026
+2027
+2028
+2029
+2030
+2031
+2032
+2033
+2034
+2035
+2036
+2037
+2038
+2039
+2040;
+
+# year by year fuel costs
+# from CEC Generator and Fuel Cost Summary 4.xls (based on CEC Cost of Generation Report from 4/19/10, with fuel forecast that looks like it came from final 2007 IEPR, on 2/25/09)
+# NOTE: data series begins in 2006, so I assume fuel costs were the same in 2005
+# TODO: find comparable costs for 2005
+# TODO: switch from gassified coal to pulverized coal
+# TODO: switch to AZ/NV coal and uranium prices, e.g., in 
+#   http://www.synapse-energy.com/Downloads/SynapseReport.2006-02.SCE.Mohave-Alternative-Generation-Resources.05-020-Appendix%20F.pdf
+# TODO: find a better forecast (e.g., 2009 MPR?)
+param fuel_cost :			
+	Gas	Nuclear	Coal :=
+2005	7.54	0.62	1.78
+2006	7.54	0.62	1.78
+2007	6.61	0.70	1.64
+2008	6.93	0.80	1.79
+2009	6.87	0.66	1.88
+2010	7.19	0.67	2.17
+2011	7.40	0.69	2.18
+2012	7.87	0.72	2.20
+2013	8.15	0.74	2.21
+2014	8.48	0.76	2.22
+2015	8.59	0.78	2.23
+2016	9.09	0.80	2.24
+2017	9.43	0.81	2.25
+2018	9.92	0.83	2.25
+2019	10.54	0.84	2.26
+2020	10.78	0.85	2.26
+2021	10.98	0.86	2.27
+2022	11.65	0.87	2.27
+2023	11.90	0.88	2.27
+2024	12.23	0.89	2.27
+2025	12.00	0.90	2.27
+2026	12.32	0.90	2.28
+2027	12.46	0.91	2.29
+2028	12.59	0.91	2.30
+2029	12.90	0.92	2.31
+2030	13.21	0.93	2.32
+2031	13.48	0.93	2.32
+2032	13.76	0.94	2.33
+2033	14.00	0.95	2.34
+2034	14.24	0.96	2.35
+2035	14.47	0.97	2.35
+2036	14.75	0.97	2.36
+2037	15.01	0.98	2.37
+2038	15.30	0.99	2.38
+2039	15.60	1.00	2.39
+2040	15.89	1.00	2.39
+;
+
+# penalty charge assigned for unserved load in any zone in any hour
+# low values could lead to unserved load
+# values higher or lower than 10000000 may cause slower iterations (not tested thoroughly)
+param unsatisfied_load_penalty := 10000000;
+
+# cost of carbon emissions ($/tonneCO2)
+param carbon_cost := 30;
+
+# carbon content (tonnes CO2 per million Btu)
+# gas converted from http://www.eia.doe.gov/oiaf/1605/coefficients.html
+# this page says nevada and arizona coal are around 205-208 pounds per million Btu: http://www.eia.doe.gov/cneaf/coal/quarterly/co2_article/co2.html
+param carbon_content :=
+Gas 0.0531
+Coal 0.0939;

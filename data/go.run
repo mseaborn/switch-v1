@@ -1,0 +1,6 @@
+# this uses an option variable, to avoid changing the problem 
+# and causing ampl to forget a write b... statement
+option start_time (time());
+solve;
+printf "Time taken: %d seconds\n", time()-num($start_time);
+include ../basicstats.run;

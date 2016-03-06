@@ -1,0 +1,6 @@
+commands ../calculate_results.run;
+printf "\n$%d/tCO2: $%3.2f/MWh, wind=%2d\%, trough=%2d\%, pv=%2d\%, hydro=%2d\%, geo=%2d\%, nuclear=%2d\%, coal=%2d\%, gas=%2d\%\n\n",
+  carbon_cost,net_cost_per_mwh,
+  100*wind_mwh/load_mwh, 100*trough_mwh/load_mwh, 100*pv_mwh/load_mwh,
+  100*hydro_mwh/load_mwh, 100*geothermal_mwh/load_mwh, 100*nuclear_mwh/load_mwh, 
+  100*coal_mwh/load_mwh, 100*gas_mwh/load_mwh;
